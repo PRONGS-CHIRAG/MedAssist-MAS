@@ -64,6 +64,79 @@ Each consultation is handled by **role-specific AI agents**, coordinated via an 
 
 ---
 
+
+## 🔐 Safety-First Design: Red-Flag Detection Layer 🚨
+
+MedAssist MAS includes a **pre-agent safety layer** that detects **medical red flags** *before* any AI agents generate guidance.
+
+This ensures that **potential emergencies are escalated immediately**, preventing unsafe or misleading advice.
+
+
+
+## 🚨 Red-Flag Detection (New Feature)
+
+Before initiating the multi-agent consultation, MedAssist MAS runs a **rule-based red-flag detection module** that scans user input for high-risk symptoms such as:
+
+* Chest pain or pressure
+* Difficulty breathing
+* Stroke-like symptoms (slurred speech, weakness, vision loss)
+* Fainting or severe confusion
+* Severe bleeding or vomiting blood
+* Severe allergic reactions (throat/lip swelling)
+* High fever with concerning signs
+* Suicidal ideation or self-harm language
+
+### How it works
+
+1. User submits symptoms via the Gradio UI
+2. **Red-flag detector executes immediately**
+3. If **high risk** is detected:
+
+   * Agent flow is **halted**
+   * 🚨 Emergency guidance is shown
+4. If **medium risk** is detected:
+
+   * A caution banner is displayed
+   * Agents proceed conservatively
+5. If **no risk** is detected:
+
+   * Full multi-agent consultation runs normally
+
+---
+
+## 🛡️ Safety Levels
+
+| Level         | Behavior                                      |
+| ------------- | --------------------------------------------- |
+| ✅ **None**    | Proceed with standard triage guidance         |
+| 🟠 **Medium** | Show caution banner, advise closer monitoring |
+| 🚨 **High**   | Stop agents, instruct urgent medical care     |
+
+This design prevents **hallucinated reassurance** in emergencies and aligns with **responsible AI principles**.
+
+
+
+---
+
+## 🏥 Responsible AI & Healthcare Alignment
+
+* Safety checks run **before any LLM reasoning**
+* Conservative escalation logic
+* No medical diagnoses are made
+* Clear emergency disclaimers
+* Human-in-the-loop ready
+
+This makes MedAssist MAS suitable for:
+
+* Healthcare AI demos
+* Hackathons
+* Educational & research prototypes
+* Safety-aware agentic systems
+
+
+
+---
+
 ## 🎨 User Interface
 
 Built with **Gradio**, the UI is designed to be:

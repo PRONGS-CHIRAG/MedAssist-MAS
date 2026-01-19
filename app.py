@@ -32,6 +32,55 @@ llm_config = {
 # Disable docker execution (matches your notebook)
 code_execution_config = {"use_docker": False}
 
+from pydantic import BaseModel, Field
+from typing import List, Literal, Optional
+
+class ConsultationOutput(BaseModel):
+    """Structured, validated output for a healthcare triage consultation.
+
+    Defines the machine-readable schema for the final consultation
+    response produced by the consultation agent. This model enforces
+    consistent, safety-aware outputs that can be validated, rendered
+    in the UI, or integrated into downstream systems.
+
+    The fields are intentionally non-diagnostic and designed for
+    educational triage and decision support only.
+
+    Attributes:
+        urgency_level: Overall urgency assessment ("none", "low",
+            "medium", or "high").
+        possible_conditions: Non-diagnostic symptom-based possibilities.
+        self_care: Conservative home care or OTC guidance.
+        see_doctor_if: Conditions under which professional medical care
+            should be sought.
+        emergency_now_if: Warning signs requiring immediate medical
+            attention.
+        clarifying_questions: Follow-up questions to gather missing
+            information.
+        summary: User-facing summary of recommended next steps.
+    """
+    urgency_level: Literal["none", "low", "medium", "high"] = Field(
+        ..., description="Overall urgency of the situation."
+    )
+    possible_conditions: List[str] = Field(
+        default_factory=list, description="Non-diagnostic possibilities based on symptoms."
+    )
+    self_care: List[str] = Field(
+        default_factory=list, description="Conservative home care / OTC guidance."
+    )
+    see_doctor_if: List[str] = Field(
+        default_factory=list, description="Triggers to seek professional care."
+    )
+    emergency_now_if: List[str] = Field(
+        default_factory=list, description="Emergency warning signs requiring immediate care."
+    )
+    clarifying_questions: List[str] = Field(
+        default_factory=list, description="Follow-up questions if key info is missing."
+    )
+    summary: str = Field(
+        ..., description="A short user-facing summary of next steps."
+    )
+
 
 def build_agents_and_manager():
     """Create and initialize AutoGen agents and a GroupChatManager.
@@ -81,19 +130,30 @@ def build_agents_and_manager():
     )
 
     consultation_agent = ConversableAgent(
-        name="consultation",
-        system_message=(
-            "You decide if a doctor's visit is required and provide a final structured plan:\n"
-            "1) What it might be\n"
-            "2) What to do now\n"
-            "3) When to see a doctor / urgent care / ER\n"
-            "4) What info to track\n\n"
-            "IMPORTANT: End your response with 'CONSULTATION_COMPLETE'."
-        ),
-        llm_config=llm_config,
-        code_execution_config=code_execution_config,
-        human_input_mode="NEVER",
-    )
+    name="consultation",
+    system_message=(
+        "You are the final triage agent. Produce ONLY a valid JSON object that matches this schema:\n"
+        "{\n"
+        '  "urgency_level": "none|low|medium|high",\n'
+        '  "possible_conditions": ["..."],\n'
+        '  "self_care": ["..."],\n'
+        '  "see_doctor_if": ["..."],\n'
+        '  "emergency_now_if": ["..."],\n'
+        '  "clarifying_questions": ["..."],\n'
+        '  "summary": "..." \n'
+        "}\n\n"
+        "Rules:\n"
+        "- Output MUST be JSON only (no markdown, no extra text).\n"
+        "- Do not diagnose; use cautious language.\n"
+        "- Keep items short and actionable.\n"
+        "- If any red flags exist, set urgency_level to 'high' and fill emergency_now_if.\n"
+        "End."
+    ),
+    llm_config=llm_config,
+    code_execution_config=code_execution_config,
+    human_input_mode="NEVER",
+)
+
 
     groupchat = GroupChat(
         agents=[diagnosis_agent, pharmacy_agent, consultation_agent],
@@ -155,6 +215,64 @@ import traceback
 
 import re
 from typing import Dict, Any, List, Tuple
+import json
+import re
+from typing import Tuple
+
+def extract_json(text: str) -> str:
+    """Extract the first JSON object from a text string.
+
+    Attempts to locate and return the first valid JSON-like object
+    embedded within a larger text response. This is primarily used
+    to recover structured outputs from LLM responses when extra
+    text is accidentally included.
+
+    Args:
+        text: Raw text that may contain an embedded JSON object.
+
+    Returns:
+        A string containing the extracted JSON object if found;
+        otherwise, an empty string.
+    """
+    # If agent outputs clean JSON, this returns the whole thing.
+    # If not, try to salvage JSON within text.
+    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+    return match.group(0) if match else ""
+
+def parse_consultation_output(raw_text: str) -> Tuple[Optional[ConsultationOutput], str]:
+    """Parse and validate structured consultation output.
+
+    Extracts a JSON object from raw LLM output, parses it, and validates
+    it against the ConsultationOutput schema. This ensures the final
+    consultation response is well-formed, predictable, and safe for
+    downstream use.
+
+    Args:
+        raw_text: Raw text output produced by the consultation agent.
+
+    Returns:
+        A tuple of:
+            parsed: A validated ConsultationOutput instance if parsing
+                and validation succeed; otherwise None.
+            error_message: An error description if parsing or schema
+                validation fails; empty string on success.
+    """
+    json_str = extract_json(raw_text)
+    if not json_str:
+        return None, "No JSON object found in consultation output."
+
+    try:
+        data = json.loads(json_str)
+    except json.JSONDecodeError as e:
+        return None, f"Invalid JSON: {e}"
+
+    try:
+        parsed = ConsultationOutput.model_validate(data)
+        return parsed, ""
+    except Exception as e:
+        return None, f"Schema validation failed: {e}"
+
+
 
 def detect_red_flags(symptoms: str, age: str = "", extra: str = "") -> Dict[str, Any]:
     """Detect emergency medical red flags from user-provided text.
@@ -319,11 +437,28 @@ def run_consultation(symptoms: str, age: str, duration: str, extra: str):
 
     chat_messages = extract_chat_messages(manager)
 
-    final = ""
+    # Find consultation agent raw message
+    consult_raw = ""
     for msg in reversed(chat_messages):
         if "Consultation Agent" in msg["content"]:
-            final = msg["content"]
+            consult_raw = msg["content"]
             break
+
+    parsed, err = parse_consultation_output(consult_raw)
+
+    if parsed:
+        final = (
+            f"Urgency: {parsed.urgency_level}\n\n"
+            f"Summary:\n{parsed.summary}\n\n"
+            f"Possible conditions:\n- " + "\n- ".join(parsed.possible_conditions or ["N/A"]) + "\n\n"
+            f"Self-care:\n- " + "\n- ".join(parsed.self_care or ["N/A"]) + "\n\n"
+            f"See doctor if:\n- " + "\n- ".join(parsed.see_doctor_if or ["N/A"]) + "\n\n"
+            f"Emergency now if:\n- " + "\n- ".join(parsed.emergency_now_if or ["N/A"]) + "\n\n"
+            f"Clarifying questions:\n- " + "\n- ".join(parsed.clarifying_questions or ["None"])
+        )
+    else:
+        # Fallback to raw text if parsing fails
+        final = f"⚠️ Could not parse structured output.\nReason: {err}\n\nRaw output:\n{consult_raw}"
 
     raw_log = "\n\n".join(m["content"] for m in chat_messages)
 

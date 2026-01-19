@@ -55,7 +55,7 @@ Each consultation is handled by **role-specific AI agents**, coordinated via an 
 | 🧑 **Patient Agent**         | Initiates the consultation using user input                          |
 | 🩺 **Diagnosis Agent**       | Analyzes symptoms, suggests possible causes, flags red-warning signs |
 | 💊 **Pharmacy Agent**        | Recommends conservative OTC and self-care options                    |
-| 👨‍⚕️ **Consultation Agent** | Determines urgency and provides structured next steps                |
+| 👨‍⚕️ **Consultation Agent** | Determines urgency and provides structured next steps with Pydantic output validation                |
 | 🧠 **GroupChatManager**      | Controls turn-taking and agent coordination                          |
 
 ✔ Fresh agent instances per request

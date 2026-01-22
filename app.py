@@ -366,39 +366,16 @@ def detect_red_flags(symptoms: str, age: str = "", extra: str = "") -> Dict[str,
     }
 
 
-def run_consultation(symptoms: str, age: str, duration: str, extra: str):
-    """Run a safety-aware, multi-agent healthcare triage consultation.
-
-    Performs an initial red-flag safety check before orchestrating a
-    multi-agent consultation workflow. If high-risk emergency symptoms
-    are detected, the agent flow is halted and urgent guidance is
-    returned. Otherwise, the function coordinates diagnosis, pharmacy,
-    and consultation agents to produce triage-style recommendations.
-
-    This function is intended for educational decision support only and
-    does not provide medical diagnoses.
-
-    Args:
-        symptoms: Description of the user's symptoms (required).
-        age: Optional age of the user for risk context.
-        duration: Optional duration of symptoms.
-        extra: Optional additional medical context (e.g., conditions,
-            medications, allergies).
-
-    Returns:
-        A tuple containing:
-            chat_messages: List of Gradio-formatted chat messages from agents.
-            alert_md: Markdown alert indicating red-flag or caution status.
-            final: Final consultation summary and next-step guidance.
-            raw_log: Plain-text log of the full agent conversation.
+def run_consultation(symptoms: str, age: str, duration: str, extra: str, use_memory: bool, memory):
+    """
+    Returns: chat_messages, alert_md, final, json_structured, raw_log, updated_memory
     """
     symptoms = (symptoms or "").strip()
     if not symptoms:
-        return [], "", "Please enter symptoms to begin.", ""
+        return [], "", "Please enter symptoms to begin.", {}, "", memory
 
+    # --- red flag check (your existing code) ---
     rf = detect_red_flags(symptoms=symptoms, age=age or "", extra=extra or "")
-
-    # 🚨 If high red-flag: stop the agent flow and show urgent guidance
     if rf["level"] == "high":
         flags_text = ", ".join(rf["flags"]) if rf["flags"] else "Emergency warning signs"
         alert_md = (
@@ -409,35 +386,44 @@ def run_consultation(symptoms: str, age: str, duration: str, extra: str):
             "- If breathing is difficult, chest pain is severe, or there’s confusion/fainting, **seek immediate help now**.\n\n"
             "_MedAssist MAS provides educational guidance and cannot diagnose emergencies._"
         )
-        # Return empty chat + alert + final + raw log
-        return [], alert_md, "Red-flag detected — seek urgent medical care.", ""
+        # Do NOT add emergency outputs to memory by default (optional, but safer)
+        return [], alert_md, "Red-flag detected — seek urgent medical care.", {}, "", memory
 
-    # 🟠 Medium: proceed, but show caution banner
-    if rf["level"] == "medium":
-        alert_md = (
-            "### 🟠 Caution\n"
-            "Some factors suggest **higher risk** (e.g., age group + symptoms). "
-            "Please monitor closely and consider earlier medical advice if symptoms worsen."
-        )
-    else:
-        alert_md = "### ✅ No emergency red-flags detected\nProceeding with triage-style guidance."
+    alert_md = (
+        "### 🟠 Caution\nSome factors suggest **higher risk**. Monitor closely and consider earlier medical advice if symptoms worsen."
+        if rf["level"] == "medium"
+        else "### ✅ No emergency red-flags detected\nProceeding with triage-style guidance."
+    )
+
+    # --- memory context ---
+    memory_context = ""
+    if use_memory:
+        memory_context = build_memory_context(memory, max_items=3)
 
     patient_agent, manager = build_agents_and_manager()
+
+    memory_block = ""
+    if use_memory and memory_context:
+        memory_block = f"SESSION MEMORY:\n{memory_context}\n\n"
 
     patient_agent.initiate_chat(
         manager,
         message=(
-            "I need a medical triage-style suggestion (not a diagnosis). "
+            "You are assisting with an educational triage-style consultation (not a diagnosis).\n\n"
+            f"{memory_block}"
+            "CURRENT CHECKUP:\n"
             f"Symptoms: {symptoms} | "
             f"Age: {age or 'N/A'} | "
             f"Duration: {duration or 'N/A'} | "
-            f"Extra: {extra or 'None'}."
+            f"Extra: {extra or 'None'}.\n\n"
+            "Use the session memory to avoid repeating questions and to account for symptom progression."
         ),
     )
 
+
     chat_messages = extract_chat_messages(manager)
 
-    # Find consultation agent raw message
+    # --- get consultation agent raw output (as you already do) ---
     consult_raw = ""
     for msg in reversed(chat_messages):
         if "Consultation Agent" in msg["content"]:
@@ -445,6 +431,7 @@ def run_consultation(symptoms: str, age: str, duration: str, extra: str):
             break
 
     parsed, err = parse_consultation_output(consult_raw)
+    structured = parsed.model_dump() if parsed else {}
 
     if parsed:
         final = (
@@ -457,13 +444,43 @@ def run_consultation(symptoms: str, age: str, duration: str, extra: str):
             f"Clarifying questions:\n- " + "\n- ".join(parsed.clarifying_questions or ["None"])
         )
     else:
-        # Fallback to raw text if parsing fails
         final = f"⚠️ Could not parse structured output.\nReason: {err}\n\nRaw output:\n{consult_raw}"
 
     raw_log = "\n\n".join(m["content"] for m in chat_messages)
 
-    return chat_messages, alert_md, final, raw_log
+    # --- update memory ---
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    summary_for_context = (
+        f"Symptoms={symptoms}; Duration={duration or 'N/A'}; "
+        f"AdviceSummary={(parsed.summary if parsed else 'N/A')}"
+    )
 
+    new_item = {
+        "timestamp": timestamp,
+        "inputs": {"symptoms": symptoms, "age": age, "duration": duration, "extra": extra},
+        "red_flags": rf,
+        "structured": structured,
+        "summary_for_context": summary_for_context,
+    }
+    memory = (memory or []) + [new_item]
+
+    return chat_messages, alert_md, final, structured, raw_log, memory
+
+from datetime import datetime
+
+def build_memory_context(memory, max_items: int = 3) -> str:
+    """Build a compact context from prior checkups for prompt conditioning."""
+    if not memory:
+        return "No prior checkups in this session."
+
+    recent = memory[-max_items:]
+    lines = ["Prior checkups (most recent first):"]
+    for i, item in enumerate(reversed(recent), start=1):
+        ts = item.get("timestamp", "")
+        summary = item.get("summary_for_context", "").strip()
+        urgency = item.get("structured", {}).get("urgency_level", "unknown")
+        lines.append(f"{i}) [{ts}] urgency={urgency} | {summary}")
+    return "\n".join(lines)
 
 
 def clear_all():
@@ -475,7 +492,11 @@ def clear_all():
     Returns:
         A tuple of empty values matching the Gradio component order.
     """
-    return [], "", "", "", "", "", "", ""
+    return [], "", "", "", "", "", "", "", ""
+
+def clear_memory():
+    return []
+
 
 
 # ---- UI ----
@@ -486,6 +507,7 @@ CSS = """
 """
 
 with gr.Blocks(css=CSS, title="MedAssist MAS (Multi-Agent System)") as demo:
+    memory_state = gr.State([])
     gr.Markdown(
         """
         <div id="title">🧠🩺 AI Healthcare Consultation</div>
@@ -513,9 +535,14 @@ with gr.Blocks(css=CSS, title="MedAssist MAS (Multi-Agent System)") as demo:
                 placeholder="Allergies, meds, chronic conditions, pregnancy, recent travel, etc.",
                 lines=2,
             )
+            use_memory = gr.Checkbox(
+                value=True,
+                label="Use memory from past checkups"
+            )
 
             with gr.Row():
                 run_btn = gr.Button("Start Consultation", variant="primary")
+                clear_memory_btn = gr.Button("Clear Memory")
                 clear_btn = gr.Button("Clear")
 
             gr.Markdown(
@@ -536,21 +563,39 @@ with gr.Blocks(css=CSS, title="MedAssist MAS (Multi-Agent System)") as demo:
                 label="Final Summary & Next Steps",
                 lines=8,
             )
-
+            # 🧾 Structured, validated JSON output (Pydantic)
+            json_out = gr.JSON(
+                label="Structured Output (Validated)",
+                 visible=True,
+            )
             with gr.Accordion("Show raw conversation log", open=False):
                 raw_out = gr.Textbox(label="Raw Log", lines=14)
 
     # Wiring
     run_btn.click(
     fn=run_consultation,
-    inputs=[symptoms_in, age_in, duration_in, extra_in],
-    outputs=[chatbot, alert_out, final_out, raw_out],
+    inputs=[symptoms_in, age_in, duration_in, extra_in,use_memory,memory_state],
+    outputs=[chatbot, alert_out, final_out, json_out, raw_out,memory_state],
 )
 
     clear_btn.click(
         fn=clear_all,
         inputs=[],
-        outputs=[chatbot, symptoms_in, age_in, duration_in, extra_in, final_out, alert_out, raw_out],
+        outputs=[
+        chatbot,
+        alert_out,
+        final_out,
+        json_out,
+        raw_out,
+        memory_state,
+        symptoms_in,
+        age_in,
+    ],
+    )
+    clear_memory_btn.click(
+        fn=clear_memory,
+        inputs=[],
+        outputs=[memory_state],
     )
 
 if __name__ == "__main__":
